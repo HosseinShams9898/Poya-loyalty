@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "crm-backend/src/server.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "crm-frontend/package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "dist"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/crm-backend/src/server.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/crm-frontend/$1"
+    },
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/crm-frontend/index.html"
+    }
+  ]
+}

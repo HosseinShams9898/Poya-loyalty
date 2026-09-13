@@ -1,0 +1,11 @@
+const express=require('express');
+const {requireAuth,requireRole}=require('../middleware/auth');
+const sepidar=require('../services/sepidarService');
+const router=express.Router();
+router.use(requireAuth,requireRole('ADMIN'));
+router.get('/sepidar/status',(_req,res)=>res.json({success:true,data:sepidar.status()}));
+router.post('/sepidar/test',async(_req,res)=>{try{const connected=await sepidar.testConnection();res.json({success:true,data:{connected}})}catch(e){res.status(400).json({success:false,message:e.message})}});
+router.post('/sepidar/sync/customers',async(_req,res)=>{try{res.json({success:true,data:await sepidar.syncCustomers()})}catch(e){console.error(e);res.status(500).json({success:false,message:e.message})}});
+router.post('/sepidar/sync/invoices',async(_req,res)=>{try{res.json({success:true,data:await sepidar.syncInvoices()})}catch(e){console.error(e);res.status(500).json({success:false,message:e.message})}});
+router.post('/sepidar/sync',async(_req,res)=>{try{res.json({success:true,data:await sepidar.syncAll()})}catch(e){console.error(e);res.status(500).json({success:false,message:e.message})}});
+module.exports=router;

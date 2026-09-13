@@ -1,0 +1,588 @@
+generator client {
+  provider      = "prisma-client-js"
+  // rhel-openssl-3.0.x = محیط اجرای Vercel (Amazon Linux 2023 / Node 20+)
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Internal users
+model User {
+  id        String   @id @default(cuid())
+  firstName String
+  lastName  String
+  email     String   @unique
+  mobile    String?
+  password  String
+  role      String   @default("LOYALTY_MANAGER") // ADMIN | LOYALTY_MANAGER
+  status    String   @default("ACTIVE") // ACTIVE | INACTIVE
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  pushSubscriptions PushSubscription[]
+  notifications     Notification[]
+  campaigns         Campaign[]         @relation("CampaignCreator")
+  assignedCustomers Customer[]         @relation("CustomerAssignee")
+  refreshTokens     RefreshToken[]
+
+  @@map("users")
+}
+
+
+
+
+// Loyalty member master data
+model Customer {
+  id                 String    @id @default(cuid())
+  membershipNo       String    @unique @default(cuid())
+  accountingSystem   String?   @default("SEPIDAR")
+  accountingRef      String?   @unique
+  accountingCode     String?
+  referralCode       String    @unique @default(uuid())
+  fullName           String
+  mobile             String?   @unique
+  company            String?
+  customerType       String    @default("CONTRACTOR") // CONTRACTOR | REPRESENTATIVE | END_CUSTOMER
+  nationalId         String?
+  status             String    @default("NEW") // NEW | ACTIVE | IN_RISK | CHURNED
+  memberStatus       String    @default("ACTIVE") // ACTIVE | SUSPENDED | CLOSED
+  city               String?
+  province           String?
+  birthDate          DateTime?
+  anniversaryDate    DateTime?
+  joinedAt           DateTime  @default(now())
+  tierId             String?
+  assignedToId       String?
+  totalPurchase      BigInt    @default(0)
+  totalPoints        Int       @default(0) // spendable balance
+  lifetimePoints     Int       @default(0)
+  redeemedPoints     Int       @default(0)
+  expiredPoints      Int       @default(0)
+  walletBalance      BigInt    @default(0)
+  avgDaysBetween     Int?
+  daysSinceLast      Int?
+  churnThresholdDays Int?
+  churnDetectedAt    DateTime?
+  reactivatedAt      DateTime?
+  invoicesCount      Int       @default(0)
+  preferredChannel   String    @default("SMS") // SMS | PUSH | EMAIL
+  marketingConsent   Boolean   @default(true)
+  profileCompletedAt DateTime?
+  lastActivityAt     DateTime?
+  csatAverage        Float?
+  csatResponses      Int       @default(0)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  tier                  LoyaltyTier?                 @relation(fields: [tierId], references: [id], onDelete: SetNull)
+  assignedTo            User?                        @relation("CustomerAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  invoices              Invoice[]
+  csatTokens            CsatToken[]
+  pointTransactions     PointTransaction[]
+  walletTransactions    WalletTransaction[]
+  redemptions           RewardRedemption[]
+  referralsMade         Referral[]                   @relation("ReferralReferrer")
+  referralReceived      Referral?                    @relation("ReferralReferred")
+  missionProgress       CustomerMission[]
+  customerNotifications CustomerNotification[]
+  otpCodes              MemberOtpCode[]
+  coupons               LoyaltyCoupon[]
+  feedbacks             CustomerFeedback[]
+  communicationMessages CommunicationMessage[]
+
+  @@index([tierId])
+  @@index([customerType])
+  @@index([assignedToId])
+  @@index([status, memberStatus])
+  @@index([lastActivityAt])
+  @@map("customers")
+}
+
+model Invoice {
+  id                  String    @id @default(cuid())
+  invoiceNumber       String    @unique
+  externalRef         String?   @unique
+  invoiceDate         DateTime?
+  customerId          String
+  amount              BigInt
+  paymentType         String    @default("CREDIT") // CASH | CREDIT
+  paymentStatus       String    @default("PENDING") // PAID | PENDING | OVERDUE
+  source              String    @default("MANUAL") // MANUAL | SEPIDAR_EXCEL | SEPIDAR_API
+  delayDays           Int       @default(0)
+  paymentDate         DateTime?
+  loyaltyPointsEarned Int       @default(0)
+  loyaltyProcessedAt  DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  customer Customer       @relation(fields: [customerId], references: [id])
+  coupon   LoyaltyCoupon?
+
+  @@index([customerId, createdAt])
+  @@index([paymentStatus])
+  @@map("invoices")
+}
+
+// Loyalty engine
+model LoyaltyTier {
+  id           String   @id @default(cuid())
+  code         String   @unique
+  title        String
+  audienceType String   @default("CONTRACTOR") // CONTRACTOR | REPRESENTATIVE | ALL
+  description  String?
+  color        String   @default("#64748B")
+  icon         String   @default("medal")
+  minPoints    Int      @default(0)
+  multiplier   Float    @default(1)
+  benefits     String   //Json
+  sortOrder    Int      @default(0)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  customers Customer[]
+  rewards   Reward[]   @relation("RewardTier")
+
+  @@index([isActive, minPoints])
+  @@index([audienceType, isActive, minPoints])
+  @@map("loyalty_tiers")
+}
+
+model LoyaltyRule {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  title       String
+  description String?
+  eventType   String // INVOICE_PAID | PURCHASE | ON_TIME_PAYMENT | PROFILE_COMPLETED | REFERRAL_QUALIFIED | MANUAL
+  conditions  String //Json
+  action      String // { type: POINTS|MULTIPLIER|CASHBACK, value, cap } Json
+  priority    Int       @default(100)
+  stackable   Boolean   @default(true)
+  isActive    Boolean   @default(true)
+  startsAt    DateTime?
+  endsAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([eventType, isActive, priority])
+  @@map("loyalty_rules")
+}
+
+model PointTransaction {
+  id              String    @id @default(cuid())
+  customerId      String
+  type            String // EARN | REDEEM | EXPIRE | ADJUST | REFUND
+  sourceType      String // INVOICE | REWARD | MISSION | REFERRAL | CAMPAIGN | MANUAL
+  sourceId        String?
+  points          Int // signed value
+  remainingPoints Int? // unspent amount for expirable EARN/REFUND lots
+  balanceAfter    Int
+  description     String
+  expiresAt       DateTime?
+  expiredAt       DateTime?
+  metadata        String? //Json
+  actorUserId     String?
+  createdAt       DateTime  @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, createdAt])
+  @@index([expiresAt, expiredAt])
+  @@index([sourceType, sourceId])
+  @@map("point_transactions")
+}
+
+model WalletTransaction {
+  id           String    @id @default(cuid())
+  customerId   String
+  type         String // CREDIT | DEBIT | REFUND | ADJUST
+  sourceType   String // CASHBACK | POINT_CONVERSION | REWARD | INVOICE | MANUAL
+  sourceId     String?
+  amount       BigInt // signed value
+  balanceAfter BigInt
+  description  String
+  expiresAt    DateTime?
+  metadata     String?  //Json
+  actorUserId  String?
+  createdAt    DateTime  @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, createdAt])
+  @@index([sourceType, sourceId])
+  @@map("wallet_transactions")
+}
+
+// Rewards, promotions and redemption
+model Reward {
+  id              String    @id @default(cuid())
+  code            String    @unique
+  title           String
+  description     String?
+  type            String // CREDIT | DISCOUNT | SERVICE | GIFT | SHIPPING | EXPERIENCE
+  costPoints      Int
+  cashValue       BigInt?
+  stock           Int?
+  redeemedCount   Int       @default(0)
+  imageIcon       String    @default("gift")
+  eligibleTierId  String?
+  validityDays    Int       @default(30)
+  fulfillmentMode String    @default("MANUAL") // MANUAL | COUPON | WALLET
+  isFeatured      Boolean   @default(false)
+  isActive        Boolean   @default(true)
+  startsAt        DateTime?
+  endsAt          DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  eligibleTier LoyaltyTier?       @relation("RewardTier", fields: [eligibleTierId], references: [id], onDelete: SetNull)
+  redemptions  RewardRedemption[]
+
+  @@index([isActive, isFeatured])
+  @@map("rewards")
+}
+
+model RewardRedemption {
+  id              String    @id @default(cuid())
+  trackingCode    String    @unique @default(uuid())
+  customerId      String
+  rewardId        String
+  pointsCost      Int
+  cashValue       BigInt?
+  status          String    @default("REQUESTED") // REQUESTED | APPROVED | FULFILLED | CANCELLED
+  fulfillmentNote String?
+  requestedAt     DateTime  @default(now())
+  approvedAt      DateTime?
+  fulfilledAt     DateTime?
+  cancelledAt     DateTime?
+  expiresAt       DateTime?
+  updatedAt       DateTime  @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  reward   Reward   @relation(fields: [rewardId], references: [id])
+
+  @@index([status, requestedAt])
+  @@index([customerId, requestedAt])
+  @@map("reward_redemptions")
+}
+
+model LoyaltySegment {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  title       String
+  description String?
+  color       String   @default("#0EA5E9")
+  criteria    String   //Json
+  isDynamic   Boolean  @default(true)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  campaigns Campaign[]
+  offers    LoyaltyOffer[]
+
+  @@map("loyalty_segments")
+}
+
+model LoyaltyOffer {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  title       String
+  description String?
+  type        String // PERCENT_DISCOUNT | FIXED_DISCOUNT | CASHBACK | FREE_SHIPPING | BONUS_POINTS
+  value       BigInt
+  conditions  String //Json
+  segmentId   String?
+  usageLimit  Int?
+  usedCount   Int       @default(0)
+  isActive    Boolean   @default(true)
+  startsAt    DateTime?
+  endsAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  segment LoyaltySegment? @relation(fields: [segmentId], references: [id], onDelete: SetNull)
+  coupons LoyaltyCoupon[]
+
+  @@index([isActive, startsAt, endsAt])
+  @@map("loyalty_offers")
+}
+
+model LoyaltyCoupon {
+  id         String    @id @default(cuid())
+  code       String    @unique
+  offerId    String
+  customerId String?
+  invoiceId  String?   @unique
+  status     String    @default("ACTIVE") // ACTIVE | USED | EXPIRED | CANCELLED
+  expiresAt  DateTime?
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  offer    LoyaltyOffer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  customer Customer?    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  invoice  Invoice?     @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  @@index([customerId, status])
+  @@map("loyalty_coupons")
+}
+
+// Engagement: missions and referrals
+model Mission {
+  id           String    @id @default(cuid())
+  code         String    @unique
+  title        String
+  description  String
+  actionType   String // PURCHASE_COUNT | PURCHASE_AMOUNT | REFERRAL | PROFILE | SURVEY | PRODUCT_MIX
+  targetValue  Int       @default(1)
+  rewardPoints Int
+  badge        String?
+  isActive     Boolean   @default(true)
+  startsAt     DateTime?
+  endsAt       DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  participants CustomerMission[]
+
+  @@index([isActive, startsAt, endsAt])
+  @@map("missions")
+}
+
+model CustomerMission {
+  id          String    @id @default(cuid())
+  customerId  String
+  missionId   String
+  progress    Int       @default(0)
+  status      String    @default("IN_PROGRESS") // IN_PROGRESS | COMPLETED | CLAIMED | EXPIRED
+  completedAt DateTime?
+  claimedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  mission  Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, missionId])
+  @@index([status])
+  @@map("customer_missions")
+}
+
+model Referral {
+  id                 String    @id @default(cuid())
+  referrerId         String
+  referredCustomerId String?   @unique
+  referredMobile     String
+  status             String    @default("INVITED") // INVITED | JOINED | QUALIFIED | REWARDED | REJECTED
+  rewardPoints       Int       @default(0)
+  qualifiedAt        DateTime?
+  rewardedAt         DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  referrer         Customer  @relation("ReferralReferrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referredCustomer Customer? @relation("ReferralReferred", fields: [referredCustomerId], references: [id], onDelete: SetNull)
+
+  @@index([referrerId, status])
+  @@index([referredMobile])
+  @@map("referrals")
+}
+
+// Member access, communication and operations
+model MemberOtpCode {
+  id         String    @id @default(cuid())
+  customerId String
+  codeHash   String
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, expiresAt])
+  @@map("member_otp_codes")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  message   String
+  link      String?
+  data      String? //Json
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+
+model CustomerNotification {
+  id         String   @id @default(cuid())
+  customerId String
+  type       String   // CSAT_REQUEST | FEEDBACK_CREATED | REWARD_APPROVED | ...
+  title      String
+  message    String
+  link       String?
+  data       String?  // Json
+  isRead     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, isRead])
+  @@index([customerId, createdAt])
+  @@map("customer_notifications")
+}
+model PushSubscription {
+  id         String   @id @default(cuid())
+  userId     String
+  endpoint   String   @unique
+  p256dhKey  String
+  authKey    String
+  active     Boolean  @default(true)
+  clientInfo String? //Json
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscriptions")
+}
+
+model CsatToken {
+  id            String   @id @default(cuid())
+  customerId    String
+  feedbackId    String? 
+  assignedToId  String?
+  token         String   @unique
+  score         Int?
+  status        String   @default("PENDING") // PENDING | SUBMITTED
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+
+  customer    Customer          @relation(fields: [customerId], references: [id])
+  feedback    CustomerFeedback? @relation(fields: [feedbackId], references: [id])
+  
+  @@index([token])
+  @@index([status])
+  @@map("csat_tokens")
+}
+
+model Campaign {
+  id              String    @id @default(cuid())
+  title           String
+  message         String
+  audienceType    String // ALL_ACTIVE | TIER | AT_RISK | SEGMENT
+  segmentId       String?
+  channels        String?  //Json
+  status          String    @default("DRAFT") // DRAFT | SCHEDULED | SENDING | COMPLETED | FAILED
+  totalRecipients Int       @default(0)
+  sentCount       Int       @default(0)
+  failedCount     Int       @default(0)
+  scheduledAt     DateTime?
+  completedAt     DateTime?
+  createdBy       String
+  createdAt       DateTime  @default(now())
+
+  creator User            @relation("CampaignCreator", fields: [createdBy], references: [id])
+  segment LoyaltySegment? @relation(fields: [segmentId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([segmentId])
+  @@map("campaigns")
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String   @default("")
+  label     String
+  group     String   @default("general") // general | loyalty | csat | member
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@map("settings")
+}
+
+
+
+// Voice of customer: complaints, suggestions, surveys and telephone notes
+model CustomerFeedback {
+  id              String    @id @default(cuid())
+  customerId      String?
+  type            String // COMPLAINT | SUGGESTION | SURVEY | CALL_NOTE
+  channel         String    @default("PHONE") // PHONE | SMS | HEPIKAL | WEB | IN_PERSON
+  subject         String
+  description     String
+  score           Int?
+  status          String    @default("OPEN") // OPEN | IN_PROGRESS | RESOLVED | CLOSED
+  priority        String    @default("NORMAL") // LOW | NORMAL | HIGH | CRITICAL
+  assignedToId    String?
+  resolution      String?
+  resolvedAt      DateTime?
+  dueAt           DateTime?
+  firstResponseAt DateTime?
+  slaBreached     Boolean   @default(false)
+  sourceMessageId String?   @unique
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  csatTokens CsatToken[]
+  @@index([type, status, createdAt])
+  @@index([customerId, createdAt])
+  @@map("customer_feedback")
+}
+
+model CommunicationMessage {
+  id             String   @id @default(cuid())
+  externalId     String?  @unique
+  customerId     String?
+  direction      String // INBOUND | OUTBOUND
+  channel        String   @default("HEPIKAL_SMS") // HEPIKAL_SMS | SMS | PHONE | WEB_PUSH
+  messageType    String   @default("GENERAL") // GENERAL | INVOICE_POINTS | CSAT | COMPLAINT | SUGGESTION
+  mobile         String?
+  body           String
+  deliveryStatus String   @default("RECEIVED") // QUEUED | SENT | DELIVERED | FAILED | RECEIVED
+  rawPayload     String? //Json
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([customerId, createdAt])
+  @@index([direction, channel, createdAt])
+  @@map("communication_messages")
+}
+
+
+
+
+
+
